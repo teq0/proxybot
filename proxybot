@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+
+# Checks whether there is a proxy on the current default network interface
+# and sets environment vars etc to use CNTLM if necessary
+#
+# TODO - update maven configs, IntelliJ, Webstorm etc
+#
+# This is a simplified version of https://github.com/kontrafiktion/proxy-settings-osx
+
+# for starters it just uses CNTLM rather than the proxy that
+# is configured in network settings or proxy PAC file
+
+CNTLM_HOST="127.0.0.1"
+CNTLM_PORT="3128"
+CNTLM_ADDRESS=$CNTLM_HOST:$CNTLM_PORT
+PROXY=$CNTLM_ADDRESS
+FORCE=0
+
+
+# make sure, script is sourced
+# -------------------------------------------------------------------------------------------------
+SOURCED=0
+if [[ "$BASH" = "" ]]; then
+  # not bash
+  if [[ "$ZSH_VERSION" != "" ]]; then
+    # zsh
+    SOURCED=1
+    SOURCE_DIR="${0%/*}"
+  else
+    echo "Unsupported shell. Exiting"
+    read
+    exit 2
+  fi
+else
+  # bash
+  COMMAND=`awk -F/ '{print $NF}' <<< $0`
+  if [ "x$COMMAND" = "xbash" -o "x$COMMAND" = "x-bash" ]; then
+    SOURCED=1
+  fi
+  SOURCE_DIR="${BASH_SOURCE[0]}"
+fi
+
+if [ $SOURCED = 0 ]; then
+  echo "script must be sourced. Exiting..."
+  exit 1
+fi
+
+
+# -------------------------------------------------------------------------------------------------
+# utility functions
+# -------------------------------------------------------------------------------------------------
+
+log() {
+  if [[ $VERBOSE == 1 ]]; then
+    echo $*
+  fi
+}
+
+logvar() {
+  local var=$1
+  if [[ "$ZSH_VERSION" != "" ]]; then
+    log "${var}: ${(P)var}"
+  else # bash
+    log "${var}: ${!var}"
+  fi
+}
+
+for i in "$@"; do
+  case $i in
+    -v|--verbose) VERBOSE=1
+                  echo VERBOSE
+                  ;;
+    -s|--set) FORCE=1
+                PROXY_ENABLED="Yes"
+                  echo FORCE SET
+                  ;;
+    -u|--unset) FORCE=1
+                PROXY_ENABLED="No"
+                  echo FORCE UNSET
+                  ;;
+    *)            INTERFACE=$i ;;
+  esac
+done
+
+# -------------------------------------------------------------------------------------------------
+
+# make sure, script runs on OS X
+if [ "Darwin" != `uname` ]; then
+    echo "This script is only tested on OSX. Aborting"
+    return 1
+fi
+
+# make sure, pacparser is installed
+#type pacparser >/dev/null 2>&1 || { echo >&2 "'pacparser' required.  Aborting."; return 2; }
+
+function enabled() {
+  echo "$1" | grep "^Enabled" | sed "s/[a-zA-Z]*: \(.*\)/\1/"
+}
+
+#--------------------------------------------------------------------------------------------------
+# MAIN
+#--------------------------------------------------------------------------------------------------
+
+
+if [[ "$FORCE" = "0" ]]; then
+
+    # determine the network service name for the default route
+    if [[ -z "$INTERFACE" ]]; then
+      INTERFACE=`route -n get default | grep interface | sed "s/.*interface: \(.*\)/\1/"`
+    fi
+
+    if [[ "$INTERFACE" == "" ]]; then
+      echo could not determine the interface
+      return 2
+    fi
+
+    logvar INTERFACE
+
+    NETWORK=`networksetup -listnetworkserviceorder | grep -B1 "$INTERFACE" | head -n 1 | sed "s/([0-9]*) \(.*\)/\1/"`
+    logvar NETWORK
+    echo "using '$NETWORK'"
+
+    # proxy explicitely set?
+    PROXY_INFO=`networksetup -getwebproxy "$NETWORK"`
+    PROXY_ENABLED=`enabled "$PROXY_INFO"`
+
+    if [ "$PROXY_ENABLED" = "Yes" ]; then
+      export PROXY_HOST=`echo "$PROXY_INFO" | grep Server | sed "s/[a-zA-Z]*: \(.*\)/\1/"`
+      export PROXY_PORT=`echo "$PROXY_INFO" | grep Port | sed "s/[a-zA-Z]*: \(.*\)/\1/"`
+
+      # to use the actual proxy rather than CNTLM uncomment this lne
+      #PROXY="$PROXY_HOST:$PROXY_PORT"
+    else
+      # proxy not explicitly set, try proxy.pac
+
+      PROXY_INFO=`networksetup -getautoproxyurl "$NETWORK"`
+      PROXY_ENABLED=`enabled "$PROXY_INFO"`
+
+      logvar PROXY_INFO
+
+      #if [ "$PROXY_ENABLED" = "Yes" ]; then
+
+      # this section retrieves and parses the proxy.pac file.
+      # this isn't very useful for CBA because the PAC file is quite complex
+
+      #  PROXY_PAC=`echo "$PROXY_INFO" | grep "^URL:" | sed "s/URL: //"`
+      #  echo "proxy.pac: $PROXY_PAC"
+      #  if [ -e /tmp/proxy.pac ]; then
+      #    if test "`find /tmp/proxy.pac -mmin +1440`"; then
+      #      curl -sL $PROXY_PAC > /tmp/proxy.pac
+      #    fi
+      #  else
+      #    curl -sL $PROXY_PAC > /tmp/proxy.pac
+      #  fi
+
+        # use the pacparser to get the proxy
+      #  PROXY=`pacparser | sed "s/PROXY //"`
+
+      #  export PROXY_HOST=`echo "$PROXY" | sed 's/\(.*\):.*/\1/'`
+      #  export PROXY_PORT=`echo "$PROXY" | sed 's/.*:\(.*\)/\1/'`
+
+        # not supported on bash 3.x:
+        # PROXY_PARTS=( `echo "$PROXY" | tr -s ':' ' '` )
+        # export PROXY_HOST="$PROXY_PARTS[1]"
+        # export PROXY_PORT="$PROXY_PARTS[2]"
+      #fi
+    fi
+fi
+
+SCRIPT_DIR=$(dirname $SOURCE_DIR)
+
+# set/unset environment variables, git and Maven settings
+if [ "$PROXY_ENABLED" = "Yes" ]; then
+  echo "  setting http_proxy: http://$PROXY"
+  PROXY_URL=`echo "http://$PROXY"`
+  export http_proxy="$PROXY_URL"
+  export HTTPS_PROXY="$PROXY_URL"
+  git config --global http.proxy "$PROXY_URL"
+  #echo "    settings.xml:"
+  # uses $PROXY_HOST and $PROXY_PORT
+  #$SCRIPT_DIR/mvn-proxy-patch.sh true
+  cp ~/.m2/settings_w_proxy.xml ~/.m2/settings.xml
+else
+  echo "  unset http_proxy"
+  unset http_proxy
+  unset HTTPS_PROXY
+  git config --global --unset http.proxy
+  # echo "    settings.xml:"
+  #$SCRIPT_DIR/mvn-proxy-patch.sh false
+  cp ~/.m2/settings_wo_proxy.xml ~/.m2/settings.xml
+fi 
+
